@@ -19,28 +19,86 @@
     return appState;
 }
 
--(void)addInstruction:(SEL)selector delegate:(UIResponder <UIApplicationDelegate>*)hook
+-(void)addInstruction:(SEL)selector delegate:(UIResponder <UIApplicationDelegate>*)hook errorHandler:(void (^)(NSError*))errorHandler
 {
     void (^simpleBlock)(id) = ^(id delegate){
-        [self redirectDelegate:selector originalDelegate:delegate delegate:hook skipHandler:true];
+        NSError *error = NULL;
+        [self redirectDelegate:selector originalDelegate:delegate delegate:hook skipHandler:true error:&error asyncError:errorHandler];
     };
     [_instructions addObject:simpleBlock];
 }
 
--(BOOL)redirectDelegate:(SEL)selector delegate:(UIResponder <UIApplicationDelegate>*)hook
+-(void)sceneDelegateWaiter:(NSNotification*)notification
 {
-    UIApplication *shared = [[UIApplication class] performSelector:@selector(sharedApplication)];
-    return [self redirectDelegate:selector originalDelegate:[shared delegate] delegate:hook skipHandler:false];
+    if ([notification.object isKindOfClass:[UIScene class]]) {
+        UIScene *scene = (UIScene *)notification.object;
+        NSMutableArray *items = _instructions;
+        for (void (^item)(id) in items)
+        {
+            item([scene delegate]);
+        }
+        [AppDelegate.shared setInstructions:@[].mutableCopy];
+    }
 }
 
--(BOOL)redirectDelegate:(SEL)selector originalDelegate:(id<UIApplicationDelegate> _Nullable)originalDelegate delegate:(UIResponder <UIApplicationDelegate>*)hook skipHandler:(BOOL)skipHandler
+-(BOOL)redirectDelegate:(SEL)selector delegate:(id)hook error:(NSError**)error asyncError:(void (^)(NSError*error))errorHandler
 {
+    BOOL isAppDelegate = [hook conformsToProtocol:@protocol(UIApplicationDelegate)];
+    id delegate = NULL;
+    if (isAppDelegate && [NSBundle.mainBundle.infoDictionary objectForKey:@"UIApplicationSceneManifest"] != NULL)
+    {
+        [self createError:error withString:@"This app doesn't use appdelegate." code:-2];
+        _isDelegateSupported = false;
+        return false;
+    }
+    else if (isAppDelegate)
+    {
+        delegate = [[[UIApplication class] performSelector:@selector(sharedApplication)] delegate];
+        _isDelegateSupported = true;
+    }
+    else if (@available(iOS 13, *))
+    {
+        delegate = [[[[[UIApplication class] performSelector:@selector(sharedApplication)] connectedScenes].allObjects firstObject] delegate];
+        if (delegate == NULL)
+        {
+            void (^simpleBlock)(id) = ^(id delegate){
+                NSError *error = NULL;
+                [self redirectDelegate:selector originalDelegate:delegate delegate:hook skipHandler:true error:&error asyncError:errorHandler];
+            };
+            [self.instructions addObject:simpleBlock];
+            [[NSNotificationCenter defaultCenter]
+             addObserver:self
+             selector:@selector(sceneDelegateWaiter:)
+             name:UISceneWillConnectNotification
+             object:nil];
+            return true;
+        }
+    }
+    return [self redirectDelegate:selector originalDelegate:delegate delegate:hook skipHandler:false error:error asyncError:errorHandler];
+}
+
+-(BOOL)redirectDelegate:(SEL)selector originalDelegate:(id)originalDelegate delegate:(id)hook skipHandler:(BOOL)skipHandler error:(NSError**)error asyncError:(void (^)(NSError*error))errorHandler
+{
+    if (originalDelegate == NULL || hook == NULL)
+    {
+        [self createError:error withString:@"NULL delegate given." code:-1];
+        if (error != NULL)
+        {
+            errorHandler(*error);
+        }
+        return false;
+    }
+    
     if ([originalDelegate respondsToSelector:selector])
     { // swizzle with our own method.
         Method swizzler = class_getInstanceMethod([hook class], selector);
         if (swizzler == NULL)
         {
-            NSLog(@"[redirectDelegate] Err: Implement the given function to your delegate.");
+            [self createError:error withString:@"Implement the given function to your delegate." code:-1];
+            if (error != NULL)
+            {
+                errorHandler(*error);
+            }
             return false;
         }
         
@@ -51,14 +109,18 @@
     }
     else if (!skipHandler)
     {
-        [self addInstruction:selector delegate:hook];
+        [self addInstruction:selector delegate:hook errorHandler:errorHandler];
     }
     else if (!_didDelegateLoad)
     { // we can't dynamically add functions -> this is why this is handled before appdelegate gets set.
         Method swizzler = class_getInstanceMethod([hook class], selector);
         if (swizzler == NULL)
         {
-            NSLog(@"[redirectDelegate] Err: Implement the given function to your delegate.");
+            [self createError:error withString:@"Implement the given function to your delegate." code:-1];
+            if (error != NULL)
+            {
+                errorHandler(*error);
+            }
             return false;
         }
         
@@ -68,11 +130,20 @@
     }
     else
     {
-        NSLog(@"[redirectDelegate] You can't ADD new methods when delegate finishes mounting.");
+        [self createError:error withString:@"You can't ADD new methods when delegate finishes mounting." code:-1];
+        if (error != NULL)
+        {
+            errorHandler(*error);
+        }
     }
-    return false;
+    return true;
 }
 
+- (void)createError:(NSError **)error withString:(NSString *)string code:(int)code {
+    if (error != NULL) {
+        *error = [NSError errorWithDomain:NSURLErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: string}];
+    }
+}
 @end
 
 @interface UIApplication (Hooked)
@@ -83,7 +154,8 @@
 {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-
+        if (![AppDelegate.shared isDelegateSupported]) // prevent app breakage
+            return;
         SEL originalSelector = @selector(setDelegate:);
         SEL swizzledSelector = @selector(setDelegateHooker:);
 
