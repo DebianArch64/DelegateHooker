@@ -8,12 +8,12 @@
 #import "DelegateHooker.h"
 #import <objc/runtime.h>
 
-@implementation AppDelegate
-+(AppDelegate *)shared {
+@implementation HookDelegate
++(HookDelegate *)shared {
     static dispatch_once_t onceToken;
-    static AppDelegate *appState;
+    static HookDelegate *appState;
     dispatch_once(&onceToken, ^{
-        appState = [AppDelegate new];
+        appState = [HookDelegate new];
         appState.instructions = [[NSMutableArray alloc] init];
     });
     return appState;
@@ -37,8 +37,18 @@
         {
             item([scene delegate]);
         }
-        [AppDelegate.shared setInstructions:@[].mutableCopy];
+        [self setInstructions:@[].mutableCopy];
     }
+}
+
+-(void)appDelegateWaiter:(NSNotification*)notification
+{
+    NSMutableArray *items = _instructions;
+    for (void (^item)(id) in items)
+    {
+        item([[[UIApplication class] performSelector:@selector(sharedApplication)] delegate]);
+    }
+    [self setInstructions:@[].mutableCopy];
 }
 
 -(BOOL)redirectDelegate:(SEL)selector delegate:(id)hook error:(NSError**)error asyncError:(void (^)(NSError*error))errorHandler
@@ -54,7 +64,21 @@
     else if (isAppDelegate)
     {
         delegate = [[[UIApplication class] performSelector:@selector(sharedApplication)] delegate];
+        if (delegate == NULL)
+        {
+            void (^simpleBlock)(id) = ^(id delegate){
+                NSError *error = NULL;
+                [self redirectDelegate:selector originalDelegate:delegate delegate:hook skipHandler:true error:&error asyncError:errorHandler];
+            };
+            [self.instructions addObject:simpleBlock];
+            [[NSNotificationCenter defaultCenter]
+             addObserver:self
+             selector:@selector(appDelegateWaiter:)
+             name:UIApplicationDidFinishLaunchingNotification
+             object:nil];
+        }
         _isDelegateSupported = true;
+        return true;
     }
     else if (@available(iOS 13, *))
     {
@@ -154,7 +178,7 @@
 {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        if (![AppDelegate.shared isDelegateSupported]) // prevent app breakage
+        if (![HookDelegate.shared isDelegateSupported]) // prevent app breakage
             return;
         SEL originalSelector = @selector(setDelegate:);
         SEL swizzledSelector = @selector(setDelegateHooker:);
@@ -181,14 +205,14 @@
 
 - (void)setDelegateHooker: (id) delegate
 {
-    NSMutableArray *items = [AppDelegate.shared instructions];
+    NSMutableArray *items = [HookDelegate.shared instructions];
     for (void (^item)(id) in items)
     {
         item(delegate);
     }
     [self setDelegateHooker:delegate]; // since methods are swapped this runs original function.
-    [AppDelegate.shared setDidDelegateLoad:true];
-    [AppDelegate.shared setInstructions:@[].mutableCopy];
+    [HookDelegate.shared setDidDelegateLoad:true];
+    [HookDelegate.shared setInstructions:@[].mutableCopy];
 }
 
 @end
