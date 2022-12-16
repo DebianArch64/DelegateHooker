@@ -63,6 +63,7 @@
     }
     else if (isAppDelegate)
     {
+        _isDelegateSupported = true;
         delegate = [[[UIApplication class] performSelector:@selector(sharedApplication)] delegate];
         if (delegate == NULL)
         {
@@ -71,13 +72,15 @@
                 [self redirectDelegate:selector originalDelegate:delegate delegate:hook skipHandler:true error:&error asyncError:errorHandler];
             };
             [self.instructions addObject:simpleBlock];
-            [[NSNotificationCenter defaultCenter]
-             addObserver:self
-             selector:@selector(appDelegateWaiter:)
-             name:UIApplicationDidFinishLaunchingNotification
-             object:nil];
+            if (_didDelegateLoad)
+            {
+                [[NSNotificationCenter defaultCenter]
+                 addObserver:self
+                 selector:@selector(appDelegateWaiter:)
+                 name:UIApplicationDidFinishLaunchingNotification
+                 object:nil];
+            }
         }
-        _isDelegateSupported = true;
         return true;
     }
     else if (@available(iOS 13, *))
@@ -178,8 +181,6 @@
 {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        if (![HookDelegate.shared isDelegateSupported]) // prevent app breakage
-            return;
         SEL originalSelector = @selector(setDelegate:);
         SEL swizzledSelector = @selector(setDelegateHooker:);
 
@@ -205,14 +206,17 @@
 
 - (void)setDelegateHooker: (id) delegate
 {
-    NSMutableArray *items = [HookDelegate.shared instructions];
-    for (void (^item)(id) in items)
+    if ([HookDelegate.shared isDelegateSupported]) // prevent app breakage
     {
-        item(delegate);
+        NSMutableArray *items = [HookDelegate.shared instructions];
+        for (void (^item)(id) in items)
+        {
+            item(delegate);
+        }
+        [HookDelegate.shared setDidDelegateLoad:true];
+        [HookDelegate.shared setInstructions:@[].mutableCopy];
     }
     [self setDelegateHooker:delegate]; // since methods are swapped this runs original function.
-    [HookDelegate.shared setDidDelegateLoad:true];
-    [HookDelegate.shared setInstructions:@[].mutableCopy];
 }
 
 @end
